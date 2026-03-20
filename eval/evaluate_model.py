@@ -63,11 +63,11 @@ def is_valid_game(replay: GameReplay) -> tuple[bool, str]:
     topo = replay.base_state.topology
     if topo.num_hexes != 19 or topo.num_corners != 54 or topo.num_edges != 72:
         return False, "non_standard_board"
-    if any(t >= 6 for t in topo.hex_types.values()):
+    if any(t == 6 for t in topo.hex_types.values()):  # 6 == TileType.GOLD
         return False, "special_tiles"
 
-    final_state = replay.replay_full()
-    total_turns = max(final_state.current_turn, len(replay._turn_boundaries) - 1, 1)
+    # Bug fix: avoid replay_full() just for the turn count — use the already-built index
+    total_turns = max(len(replay._turn_boundaries) - 1, replay.total_turns, 1)
     if total_turns < 20:
         return False, "too_short"
 
@@ -79,12 +79,18 @@ def evaluate_single_game(
     encoder: StateEncoder,
     device,
     min_turn: int = 8,
+    _timings: Optional[dict] = None,
 ) -> dict:
     """Replay one game turn-by-turn and collect per-turn model predictions.
+
+    If _timings is a dict, it will be populated with:
+        replay_s   — seconds spent in replay_to_turn()
+        infer_s    — seconds spent on model forward passes
+        n_turns    — number of turns evaluated
     """
     total_turns = max(
-        replay.replay_full().current_turn,
         len(replay._turn_boundaries) - 1,
+        replay.total_turns,
         1,
     )
     colors = replay.play_order
@@ -94,8 +100,14 @@ def evaluate_single_game(
     vp_tracks = {c: [] for c in colors}
     winner_ranks = []
 
+    t_replay = 0.0
+    t_infer  = 0.0
+
     for ti in range(1, len(replay._turn_boundaries)):
+        _t0 = time.time()
         state = replay.replay_to_turn(ti)
+        t_replay += time.time() - _t0
+
         if state.current_turn < min_turn:
             continue
 
@@ -104,8 +116,11 @@ def evaluate_single_game(
             encoded = encoder.encode(state, perspective_color=color)
             feat = torch.from_numpy(encoded["flat"]).unsqueeze(0).to(device)
 
+            _t0 = time.time()
             with torch.no_grad():
                 value, _, _ = model(feat)
+            t_infer += time.time() - _t0
+
             pred = value.item()
             turn_preds[color] = pred
             predictions[color].append(pred)
@@ -116,6 +131,11 @@ def evaluate_single_game(
         sorted_colors = sorted(colors, key=lambda c: turn_preds[c], reverse=True)
         winner_rank = sorted_colors.index(replay.winner_color) + 1
         winner_ranks.append(winner_rank)
+
+    if _timings is not None:
+        _timings["replay_s"] = _timings.get("replay_s", 0.0) + t_replay
+        _timings["infer_s"]  = _timings.get("infer_s",  0.0) + t_infer
+        _timings["n_turns"]  = _timings.get("n_turns",  0)   + len(turns)
 
     return {
         "turns": turns,
@@ -184,6 +204,7 @@ def compute_aggregate_metrics(game_results: list[dict]) -> dict:
     pred_outcome_corr = float(np.corrcoef(final_preds, final_outcomes)[0, 1]) if len(final_preds) > 1 else 0.0
     pred_win_corr = float(np.corrcoef(final_preds, final_won)[0, 1]) if len(final_preds) > 1 else 0.0
 
+    n_bins = 10  # Bug fix: n_bins was used but never defined
     bin_edges = np.linspace(0, 1, n_bins + 1)
     calibration = {"bin_centers": [], "predicted_mean": [], "actual_win_rate": [], "count": []}
 

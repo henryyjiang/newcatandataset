@@ -336,6 +336,17 @@ class CatanTrainingDataset(Dataset):
                 dtype=np.bool_, mode="r", shape=(n_samples,),
             )
 
+        # Pull all scalar arrays into RAM — they total < 1 MB for 42k samples.
+        # Only self.features stays as a memmap (the one large array worth keeping lazy).
+        # This eliminates per-sample page faults on label/score reads in __getitem__.
+        self.labels = np.array(self.labels, dtype=np.float32)
+        if self.has_aux:
+            self.outcome_scores  = np.array(self.outcome_scores,  dtype=np.float32)
+            self.position_scores = np.array(self.position_scores, dtype=np.float32)
+            self.economic_scores = np.array(self.economic_scores, dtype=np.float32)
+        if self.has_win:
+            self.won_game = np.array(self.won_game, dtype=np.float32)
+
     def __len__(self):
         return len(self.labels)
 
@@ -345,24 +356,18 @@ class CatanTrainingDataset(Dataset):
                 "features": torch.from_numpy(
                     self.features[idx].astype(np.float32).copy()
                 ),
-                "label": torch.tensor(
-                    float(self.labels[idx]), dtype=torch.float32
+                # Scalar arrays are pre-loaded into RAM in _load_memmap_dir,
+                # so these are plain numpy accesses — no page faults.
+                "label": torch.from_numpy(
+                    np.array(self.labels[idx], dtype=np.float32)
                 ),
             }
             if self.has_aux:
-                item["outcome_score"] = torch.tensor(
-                    float(self.outcome_scores[idx]), dtype=torch.float32
-                )
-                item["position_score"] = torch.tensor(
-                    float(self.position_scores[idx]), dtype=torch.float32
-                )
-                item["economic_score"] = torch.tensor(
-                    float(self.economic_scores[idx]), dtype=torch.float32
-                )
+                item["outcome_score"]  = torch.from_numpy(np.array(self.outcome_scores[idx],  dtype=np.float32))
+                item["position_score"] = torch.from_numpy(np.array(self.position_scores[idx], dtype=np.float32))
+                item["economic_score"] = torch.from_numpy(np.array(self.economic_scores[idx], dtype=np.float32))
             if self.has_win:
-                item["won_game"] = torch.tensor(
-                    float(self.won_game[idx]), dtype=torch.float32
-                )
+                item["won_game"] = torch.from_numpy(np.array(self.won_game[idx], dtype=np.float32))
         else:
             item = {
                 "features": self.features[idx],
